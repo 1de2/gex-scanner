@@ -1,0 +1,16 @@
+name: GEX Auto-Scanner
+on:
+  schedule:
+    - cron: '0 11 * * 1-5'  # 7 AM NY (UTC-4)
+    - cron: '30 13 * * 1-5'  # 9:30 AM NY
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: pip install -r requirements.txt
+      - run: python gex_scanner.py --auto-scan
+      - uses: actions/upload-artifact@v3
+        with:
+          name: gex-results
+          path: scan_results.json
