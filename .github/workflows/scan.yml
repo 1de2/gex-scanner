@@ -3,45 +3,15 @@ on:
   schedule:
     - cron: '0 11 * * 1-5'  # 7 AM NY (UTC-4)
     - cron: '30 13 * * 1-5'  # 9:30 AM NY
-  workflow_dispatch:  # Permite ejecuciones manuales desde GitHub UI
-
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - run: pip install -r requirements.txt
+      - run: python gex_scanner.py --auto-scan --mode premarket
+      - run: python gex_scanner.py --auto-scan --mode marketopen
+      - uses: actions/upload-artifact@v3
         with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          
-      - name: Run Pre-Market Scan (7 AM NY)
-        if: github.event.schedule == '0 11 * * 1-5'
-        run: |
-          python gex_scanner.py --auto-scan --mode premarket
-          echo "RESULTS=$(cat scan_results.json)" >> $GITHUB_ENV
-          
-      - name: Run Market Open Scan (9:30 AM NY)
-        if: github.event.schedule == '30 13 * * 1-5'
-        run: |
-          python gex_scanner.py --auto-scan --mode marketopen
-          echo "RESULTS=$(cat scan_results.json)" >> $GITHUB_ENV
-      
-      - name: Upload Results
-        uses: actions/upload-artifact@v3
-        with:
-          name: gex-results-${{ github.event.schedule || 'manual' }}
+          name: gex-results
           path: scan_results.json
-      
-      - name: Send to Telegram (opcional)
-        if: env.RESULTS != ''
-        run: |
-          curl -X POST \
-          -H "Content-Type: application/json" \
-          -d '{"chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}", "text": "GEX Scan Results:\n${{ env.RESULTS }}"}' \
-          https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage
