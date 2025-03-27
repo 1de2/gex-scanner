@@ -1,4 +1,3 @@
-# gex_scanner.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,12 +6,7 @@ from scipy.stats import norm
 from datetime import datetime, timedelta
 import pytz
 import json
-import argparse
 from typing import Dict, Optional, List
-
-# Configuración
-NY_TZ = pytz.timezone("America/New_York")
-TODAY = datetime.now(NY_TZ).date()
 
 class GEXScanner:
     def __init__(self):
@@ -20,7 +14,6 @@ class GEXScanner:
         self.load_history()
 
     def load_history(self):
-        """Carga el historial de escaneos"""
         try:
             with open(self.history_file, "r") as f:
                 self.history = json.load(f)
@@ -28,184 +21,158 @@ class GEXScanner:
             self.history = {"premarket": [], "marketopen": [], "manual": []}
 
     def save_history(self):
-        """Guarda el historial de escaneos"""
         with open(self.history_file, "w") as f:
             json.dump(self.history, f)
 
-    @staticmethod
-    def calculate_greeks(S: float, K: float, T: float, iv: float, 
-                        r: float = 0.01, option_type: str = "call") -> tuple:
-        """Calcula delta y gamma para una opción"""
-        d1 = (np.log(S / K) + (r + 0.5 * iv**2) * T) / (iv * np.sqrt(T))
-        delta = norm.cdf(d1) if option_type == "call" else norm.cdf(d1) - 1
-        gamma = norm.pdf(d1) / (S * iv * np.sqrt(T))
-        return delta, gamma
-
     def fetch_option_chain(self, ticker: str, expiry: datetime) -> pd.DataFrame:
-        """Obtiene la cadena de opciones con manejo de fechas disponibles"""
+        """Versión mejorada con manejo robusto de errores"""
         try:
             stock = yf.Ticker(ticker)
-            available_expirations = stock.options
             
-            if expiry.strftime("%Y-%m-%d") not in available_expirations:
-                # Selecciona la fecha más cercana posterior
-                valid_dates = [pd.to_datetime(e) for e in available_expirations 
-                              if pd.to_datetime(e) >= pd.to_datetime(expiry)]
-                if valid_dates:
-                    expiry = min(valid_dates)
-                else:
-                    expiry = pd.to_datetime(available_expirations[-1])
+            if not hasattr(stock, 'options') or not stock.options:
+                st.error(f"No hay datos de opciones para {ticker}")
+                return pd.DataFrame()
+                
+            expiry_str = expiry.strftime("%Y-%m-%d")
+            available_dates = pd.to_datetime(stock.options)
             
-            chain = stock.option_chain(expiry.strftime("%Y-%m-%d"))
-            calls = chain.calls.assign(option_type="call")
-            puts = chain.puts.assign(option_type="put")
-            return pd.concat([calls, puts])
+            if expiry_str not in stock.options:
+                valid_dates = [d for d in available_dates if d >= pd.to_datetime(expiry)]
+                expiry = min(valid_dates) if valid_dates else available_dates[-1]
+                expiry_str = expiry.strftime("%Y-%m-%d")
+                st.warning(f"Usando fecha {expiry_str} (la solicitada no estaba disponible)")
+            
+            chain = stock.option_chain(expiry_str)
+            
+            # Campos obligatorios con valores por defecto
+            required_cols = {
+                'impliedVolatility': 0.3,
+                'openInterest': 0,
+                'strike': 0,
+                'lastPrice': 0
+            }
+            
+            # Procesar calls y puts
+            dfs = []
+            for option_type, df in [('call', chain.calls), ('put', chain.puts)]:
+                df = df.copy()
+                for col, default in required_cols.items():
+                    if col not in df.columns:
+                        df[col] = default
+                df['option_type'] = option_type
+                dfs.append(df)
+                
+            return pd.concat(dfs, ignore_index=True)
+            
         except Exception as e:
-            st.error(f"Error obteniendo datos: {str(e)}")
+            st.error(f"Error al obtener datos: {str(e)}")
             return pd.DataFrame()
 
-    def scan(self, ticker: str = "SPY", expiry_date: Optional[datetime] = None,
-             mode: Optional[str] = None) -> Optional[Dict]:
-        """Ejecuta el análisis GEX (sin límites manuales)"""
-        if expiry_date is None:
-            expiry_date = TODAY + timedelta(days=3)
-        
-        S = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
-        chain = self.fetch_option_chain(ticker, expiry_date)
-        
-        if chain.empty:
-            return None
-        
-        # Calcular griegas
-        chain["T"] = (pd.to_datetime(chain["expiry"]) - pd.Timestamp.now()).dt.days / 365
-        chain[["delta", "gamma"]] = chain.apply(
-            lambda row: self.calculate_greeks(
-                S, row["strike"], row["T"], row["impliedVolatility"], row["option_type"]
-            ),
-            axis=1, result_type="expand"
-        )
-        
-        # Calcular GEX (en millones)
-        chain["gex"] = chain["gamma"] * chain["openInterest"] * (S ** 2) * 0.01 / 1e6
-        
-        # Determinar tipo de análisis
-        analysis_type = {
-            "premarket": "Pre-Market (7 AM NY)",
-            "marketopen": "Market Open (9:30 AM NY)",
-        }.get(mode, "Manual")
-        
-        # Preparar resultados
-        result = {
-            "analysis_type": analysis_type,
-            "timestamp": datetime.now(NY_TZ).strftime("%Y-%m-%d %H:%M"),
-            "ticker": ticker,
-            "spot_price": round(S, 2),
-            "total_gex": round(chain["gex"].sum(), 2),
-            "top_calls": chain[chain["option_type"] == "call"]
-                         .nlargest(3, "gex")[["strike", "gex"]]
-                         .rename(columns={"gex": "gex ($M)"})
-                         .to_dict("records"),
-            "top_puts": chain[chain["option_type"] == "put"]
-                        .nsmallest(3, "gex")[["strike", "gex"]]
-                        .rename(columns={"gex": "gex ($M)"})
-                        .to_dict("records"),
-            "expiry_used": expiry_date.strftime("%Y-%m-%d")
-        }
-        
-        # Guardar en historial
-        if mode in ["premarket", "marketopen"]:
-            self.history[mode].append(result)
-        else:
-            self.history["manual"].append(result)
-        self.save_history()
-        
-        return result
+    def calculate_greeks(self, S: float, K: float, T: float, iv: float, 
+                        option_type: str) -> tuple:
+        try:
+            d1 = (np.log(S / K) + (0.01 + 0.5 * iv**2) * T
+            d1 /= (iv * np.sqrt(T))
+            delta = norm.cdf(d1) if option_type == "call" else norm.cdf(d1) - 1
+            gamma = norm.pdf(d1) / (S * iv * np.sqrt(T))
+            return delta, gamma
+        except:
+            return (0, 0)  # Valores por defecto si hay error en cálculo
 
-    def get_history(self, mode: str, limit: int = 5) -> List[Dict]:
-        """Obtiene el historial de escaneos"""
-        return self.history.get(mode, [])[-limit:]
+    def scan(self, ticker: str, expiry_date: datetime, mode: str = None) -> Dict:
+        try:
+            S = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
+            chain = self.fetch_option_chain(ticker, expiry_date)
+            
+            if chain.empty:
+                return {"error": "Cadena de opciones vacía"}
+            
+            chain["T"] = (pd.to_datetime(chain["expiry"]) - pd.Timestamp.now()).dt.days / 365
+            chain[["delta", "gamma"]] = chain.apply(
+                lambda row: self.calculate_greeks(
+                    S, row["strike"], row["T"], row["impliedVolatility"], row["option_type"]
+                ),
+                axis=1, result_type="expand"
+            )
+            
+            chain["gex"] = chain["gamma"] * chain["openInterest"] * (S ** 2) * 0.01 / 1e6
+            
+            result = {
+                "analysis_type": mode if mode else "Manual",
+                "timestamp": datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M"),
+                "ticker": ticker,
+                "spot_price": round(S, 2),
+                "total_gex": round(chain["gex"].sum(), 2),
+                "expiry_used": expiry_date.strftime("%Y-%m-%d"),
+                "top_calls": chain[chain["option_type"] == "call"]
+                             .nlargest(3, "gex")[["strike", "gex"]]
+                             .rename(columns={"gex": "gex ($M)"})
+                             .to_dict("records"),
+                "top_puts": chain[chain["option_type"] == "put"]
+                            .nsmallest(3, "gex")[["strike", "gex"]]
+                            .rename(columns={"gex": "gex ($M)"})
+                            .to_dict("records")
+            }
+            
+            self.history[mode if mode else "manual"].append(result)
+            self.save_history()
+            return result
+            
+        except Exception as e:
+            return {"error": str(e)}
 
 def main():
-    args = argparse.ArgumentParser()
-    args.add_argument("--auto-scan", action="store_true")
-    args.add_argument("--mode", choices=["premarket", "marketopen"], default=None)
-    args = args.parse_args()
-
+    st.set_page_config(page_title="GEX Scanner Pro", layout="wide")
+    st.title("📊 Gamma Exposure Scanner")
+    
     scanner = GEXScanner()
     
-    if args.auto_scan and args.mode:
-        # Modo automático para GitHub Actions
-        results = scanner.scan(mode=args.mode)
-        with open("scan_results.json", "w") as f:
-            json.dump(results, f)
-        print(f"Análisis {args.mode} completado")
-    else:
-        # Interfaz Streamlit
-        st.set_page_config(
-            page_title="🚨 GEX Scanner Pro",
-            layout="wide",
-            page_icon="📊"
+    # Sidebar
+    st.sidebar.header("Configuración")
+    ticker = st.sidebar.selectbox("Seleccionar Activo:", ["SPY", "QQQ", "IWM", "AAPL"])
+    
+    try:
+        available_dates = yf.Ticker(ticker).options
+        expiry_date = st.sidebar.selectbox(
+            "Fecha de Expiración:",
+            options=available_dates,
+            format_func=lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
+            index=min(3, len(available_dates)-1)
         )
-        st.title("📊 Gamma Exposure Scanner (SPY/QQQ)")
-        
-        # Sidebar
-        st.sidebar.header("Configuración")
-        ticker = st.sidebar.selectbox("Activo:", ["SPY", "QQQ"])
-        
-        # Selector de fechas basado en disponibilidad
-        try:
-            available_dates = yf.Ticker(ticker).options
-            expiry_date = st.sidebar.selectbox(
-                "Fecha de Expiración:",
-                options=available_dates,
-                format_func=lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
-                index=min(3, len(available_dates)-1)  # Selecciona una fecha cercana por defecto
-            )
-            expiry_date = pd.to_datetime(expiry_date)
-        except Exception as e:
-            st.sidebar.error(f"Error cargando fechas: {str(e)}")
-            return
-        
-        # Botón de análisis manual (sin límites)
-        if st.sidebar.button("🔍 Ejecutar Análisis Manual"):
-            with st.spinner("Calculando GEX..."):
-                results = scanner.scan(ticker, expiry_date, mode="manual")
-                if results:
-                    st.success("✅ Análisis completado!")
-                    st.json(results)
-        
-        # Mostrar info (sin contador de límites)
-        st.sidebar.markdown("""
-        **📅 Análisis Automáticos:**  
-        - ⏰ 7:00 AM NY (Pre-Market)  
-        - 🕤 9:30 AM NY (Market Open)  
-        """)
-        
-        # Pestañas
-        tab1, tab2 = st.tabs(["📊 Resultados", "📅 Historial"])
-        
-        with tab1:
-            if scanner.history["manual"]:
-                st.json(scanner.history["manual"][-1])
+        expiry_date = pd.to_datetime(expiry_date)
+    except Exception as e:
+        st.sidebar.error(f"Error cargando fechas: {str(e)}")
+        return
+    
+    if st.sidebar.button("🔍 Ejecutar Análisis"):
+        with st.spinner("Calculando GEX..."):
+            result = scanner.scan(ticker, expiry_date)
+            
+            if "error" in result:
+                st.error(f"❌ Error: {result['error']}")
             else:
-                st.info("Ejecuta un análisis manual para ver resultados")
-        
-        with tab2:
-            st.header("Historial Completo")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Automáticos")
-                for scan_type in ["premarket", "marketopen"]:
-                    with st.expander(f"{scan_type.replace('_', ' ').title()}"):
-                        for scan in scanner.get_history(scan_type, 3):
-                            st.json(scan)
-            
-            with col2:
-                st.subheader("Manuales")
-                for scan in scanner.get_history("manual", 10):
-                    with st.expander(f"{scan['timestamp']}"):
-                        st.json(scan)
+                st.success("✅ Análisis completado!")
+                st.json(result)
+    
+    # Mostrar historial
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🧹 Limpiar Historial"):
+        scanner.history = {"premarket": [], "marketopen": [], "manual": []}
+        scanner.save_history()
+    
+    # Pestañas principales
+    tab1, tab2 = st.tabs(["📈 Resultados", "🕒 Historial"])
+    
+    with tab1:
+        if scanner.history["manual"]:
+            st.json(scanner.history["manual"][-1])
+    
+    with tab2:
+        st.header("Últimos Análisis")
+        for scan_type, scans in scanner.history.items():
+            with st.expander(f"{scan_type.title()} ({len(scans)} scans)"):
+                for scan in scans[-5:]:
+                    st.json(scan)
 
 if __name__ == "__main__":
     main()
