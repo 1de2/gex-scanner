@@ -2,88 +2,63 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import requests
 from scipy.stats import norm
 from datetime import datetime, timedelta
 import pytz
 import json
 from typing import Dict, Optional, List
-import requests
 
 # Configuración de Zona Horaria
 NY_TZ = pytz.timezone("America/New_York")
 
-# Configuración del Ticker
-TICKER = "SPY"  # Aquí puedes cambiarlo por el activo que prefieras
-TIMEZONE = 'America/New_York'
+# Configuración de Tradier (si se usa la API de Tradier en el futuro)
+TRADIER_API_KEY = "TU_API_KEY_DE_TRADIER"
+TRADIER_URL = "https://api.tradier.com/v1/markets/options/chains"
 
-# Función para obtener datos de opciones (mejorar para usar CBOE o Barchart)
-def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
+# Función para obtener datos de opciones desde Tradier
+def fetch_option_chain_tradier(ticker: str, expiry: datetime) -> pd.DataFrame:
+    """Obtiene la cadena de opciones desde Tradier"""
+    try:
+        headers = {'Authorization': f'Bearer {TRADIER_API_KEY}', 'Accept': 'application/json'}
+        params = {'symbol': ticker, 'expiration': expiry.strftime('%Y-%m-%d')}
+        response = requests.get(TRADIER_URL, headers=headers, params=params)
+        
+        if response.status_code != 200:
+            st.error(f"Error al obtener los datos de opciones de Tradier: {response.status_code}")
+            return pd.DataFrame()
+
+        data = response.json()
+        options = data['options']['option']
+        
+        # Crear DataFrame con las opciones
+        df = pd.DataFrame(options)
+        return df
+
+    except Exception as e:
+        st.error(f"Error al obtener los datos de opciones: {str(e)}")
+        return pd.DataFrame()
+
+# Función para obtener la cadena de opciones desde Yahoo Finance
+def fetch_option_chain_yf(ticker: str, expiry: datetime) -> pd.DataFrame:
+    """Obtiene la cadena de opciones desde Yahoo Finance"""
     try:
         stock = yf.Ticker(ticker)
         expiry_str = expiry.strftime("%Y-%m-%d")
         available_dates = [pd.to_datetime(d) for d in stock.options]
+        
+        # Asegurarse de que la fecha de expiración esté disponible
+        if expiry_str not in [d.strftime("%Y-%m-%d") for d in available_dates]:
+            st.warning(f"Usando la fecha más cercana disponible: {available_dates[0]}")
+            expiry_str = available_dates[0].strftime("%Y-%m-%d")
 
-        st.write(f"Fechas disponibles de expiración: {available_dates}")  # Depuración
-
-        if expiry_str not in stock.options:
-            valid_dates = [d for d in available_dates if d >= pd.to_datetime(expiry)]
-            expiry = min(valid_dates) if valid_dates else max(available_dates)
-            expiry_str = expiry.strftime("%Y-%m-%d")
-            st.warning(f"Usando fecha {expiry_str} (la solicitada no estaba disponible)")
-
-        # Obtener las cadenas de opciones
+        # Obtener la cadena de opciones para la fecha de expiración seleccionada
         chain = stock.option_chain(expiry_str)
+        return pd.concat([chain.calls, chain.puts], ignore_index=True)
 
-        # Verificar las columnas disponibles en la cadena de opciones
-        st.write("Columnas disponibles en la cadena de opciones:", chain.calls.columns)
-
-        defaults = {
-            'impliedVolatility': 0.3,
-            'openInterest': 0,
-            'lastPrice': 0.0,
-            'strike': 0.0
-        }
-
-        # Asegurarse de que las fechas de expiración se extraigan correctamente
-        dfs = []
-        for opt_type, df in [('call', chain.calls), ('put', chain.puts)]:
-            df = df.copy()
-            for col, default in defaults.items():
-                if col not in df.columns:
-                    df[col] = default
-            df['option_type'] = opt_type
-
-            # Extraer la fecha de expiración desde el 'contractSymbol' si está disponible
-            if 'contractSymbol' in df.columns:
-                df['expiry'] = df['contractSymbol'].apply(extract_expiry_from_symbol)
-
-            # Si no se pudo extraer la fecha, intentamos usar 'lastTradeDate'
-            if 'expiry' not in df.columns:
-                df['expiry'] = df['lastTradeDate'].apply(lambda x: pd.to_datetime(x) + timedelta(days=30))  # Aproximación por defecto
-
-            dfs.append(df)
-
-        return pd.concat(dfs, ignore_index=True)
     except Exception as e:
-        st.error(f"Error al obtener la cadena de opciones: {e}")
+        st.error(f"Error al obtener la cadena de opciones de Yahoo Finance: {str(e)}")
         return pd.DataFrame()
-
-def extract_expiry_from_symbol(symbol: str) -> pd.Timestamp:
-    """Intenta extraer la fecha de expiración desde el símbolo del contrato de opción"""
-    try:
-        # Extraer fecha de expiración del símbolo en formato YYYYMMDD
-        expiry_str = symbol[-8:]  # Asegurándonos de que la fecha está al final del símbolo
-        expiry_date = pd.to_datetime(expiry_str, format='%y%m%d', errors='coerce')
-
-        # Verificar si la fecha es válida, en caso contrario, retornar NaT
-        if pd.isna(expiry_date):
-            st.error(f"Fecha de expiración no válida en el símbolo: {symbol}")
-            return pd.NaT
-
-        return expiry_date
-    except Exception as e:
-        st.error(f"Error extrayendo fecha de expiración: {str(e)}")
-        return pd.NaT
 
 # Función para calcular el GEX (Gamma Exposure)
 def calculate_gex(S: float, K: float, T: float, iv: float, option_type: str, open_interest: float) -> float:
@@ -97,7 +72,7 @@ def calculate_gex(S: float, K: float, T: float, iv: float, option_type: str, ope
         st.error(f"Error calculando GEX: {str(e)}")
         return 0.0
 
-# Obtener la hora actual en Nueva York
+# Función para obtener la hora actual en Nueva York
 def get_ny_time():
     ny_time = datetime.now(NY_TZ)
     return ny_time
@@ -128,8 +103,8 @@ def send_telegram_alert(message: str):
 def run_analysis(ticker: str, expiry_date: datetime, mode: str = "manual"):
     st.write(f"Ejecutando análisis {mode} para {ticker}...")
 
-    # Obtener datos de la cadena de opciones
-    chain = fetch_option_chain(ticker, expiry_date)
+    # Obtener datos de la cadena de opciones (puedes elegir Tradier o Yahoo Finance)
+    chain = fetch_option_chain_yf(ticker, expiry_date)
 
     # Obtener datos del spot price (último precio de mercado)
     stock_data = yf.Ticker(ticker).history(period="1d")
