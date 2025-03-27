@@ -71,9 +71,15 @@ def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
 def extract_expiry_from_symbol(symbol: str) -> pd.Timestamp:
     """Intenta extraer la fecha de expiración desde el símbolo del contrato de opción"""
     try:
-        # Asegúrate de que el símbolo tenga el formato esperado
-        expiry_str = symbol[-8:]  # Asumiendo que la fecha de expiración está al final del símbolo en formato YYYYMMDD
-        expiry_date = pd.to_datetime(expiry_str, format='%y%m%d')
+        # Extraer fecha de expiración del símbolo en formato YYYYMMDD
+        expiry_str = symbol[-8:]  # Asegurándonos de que la fecha está al final del símbolo
+        expiry_date = pd.to_datetime(expiry_str, format='%y%m%d', errors='coerce')
+
+        # Verificar si la fecha es válida, en caso contrario, retornar NaT
+        if pd.isna(expiry_date):
+            st.error(f"Fecha de expiración no válida en el símbolo: {symbol}")
+            return pd.NaT
+
         return expiry_date
     except Exception as e:
         st.error(f"Error extrayendo fecha de expiración: {str(e)}")
