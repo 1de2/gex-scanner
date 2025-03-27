@@ -23,6 +23,8 @@ def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
         expiry_str = expiry.strftime("%Y-%m-%d")
         available_dates = [pd.to_datetime(d) for d in stock.options]
 
+        st.write(f"Fechas disponibles de expiración: {available_dates}")  # Depuración
+
         if expiry_str not in stock.options:
             valid_dates = [d for d in available_dates if d >= pd.to_datetime(expiry)]
             expiry = min(valid_dates) if valid_dates else max(available_dates)
@@ -31,16 +33,18 @@ def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
 
         # Obtener las cadenas de opciones
         chain = stock.option_chain(expiry_str)
-        
-        # Asegurarse de que las columnas estén bien definidas
+
+        # Verificar las columnas disponibles en la cadena de opciones
+        st.write("Columnas disponibles en la cadena de opciones:", chain.calls.columns)
+
         defaults = {
             'impliedVolatility': 0.3,
             'openInterest': 0,
             'lastPrice': 0.0,
             'strike': 0.0
         }
-        
-        # Crear un DataFrame con las opciones
+
+        # Asegurarse de que las fechas de expiración se extraigan correctamente
         dfs = []
         for opt_type, df in [('call', chain.calls), ('put', chain.puts)]:
             df = df.copy()
@@ -48,12 +52,32 @@ def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
                 if col not in df.columns:
                     df[col] = default
             df['option_type'] = opt_type
+
+            # Extraer la fecha de expiración desde el 'contractSymbol' si está disponible
+            if 'contractSymbol' in df.columns:
+                df['expiry'] = df['contractSymbol'].apply(self.extract_expiry_from_symbol)
+
+            # Si no se pudo extraer la fecha, intentamos usar 'lastTradeDate'
+            if 'expiry' not in df.columns:
+                df['expiry'] = df['lastTradeDate'].apply(lambda x: pd.to_datetime(x) + timedelta(days=30))  # Aproximación por defecto
+
             dfs.append(df)
-        
+
         return pd.concat(dfs, ignore_index=True)
     except Exception as e:
         st.error(f"Error al obtener la cadena de opciones: {e}")
         return pd.DataFrame()
+
+def extract_expiry_from_symbol(self, symbol: str) -> pd.Timestamp:
+    """Intenta extraer la fecha de expiración desde el símbolo del contrato de opción"""
+    try:
+        # Asegúrate de que el símbolo tenga el formato esperado
+        expiry_str = symbol[-8:]  # Asumiendo que la fecha de expiración está al final del símbolo en formato YYYYMMDD
+        expiry_date = pd.to_datetime(expiry_str, format='%y%m%d')
+        return expiry_date
+    except Exception as e:
+        st.error(f"Error extrayendo fecha de expiración: {str(e)}")
+        return pd.NaT
 
 # Función para calcular el GEX (Gamma Exposure)
 def calculate_gex(S: float, K: float, T: float, iv: float, option_type: str, open_interest: float) -> float:
@@ -100,20 +124,22 @@ def run_analysis(ticker: str, expiry_date: datetime, mode: str = "manual"):
 
     # Obtener datos de la cadena de opciones
     chain = fetch_option_chain(ticker, expiry_date)
-    
+
     # Obtener datos del spot price (último precio de mercado)
     stock_data = yf.Ticker(ticker).history(period="1d")
     spot_price = stock_data["Close"].iloc[-1]
-    
+
     # Calcular el GEX
     total_gex = 0
     for _, row in chain.iterrows():
-        T = (pd.to_datetime(row["expiry"]) - get_ny_time()).days / 365.25
-        gex = calculate_gex(spot_price, row["strike"], T, row["impliedVolatility"], row["option_type"], row["openInterest"])
-        total_gex += gex
+        # Asegurarnos de que la fecha de expiración esté presente
+        if pd.notna(row['expiry']):
+            T = (pd.to_datetime(row["expiry"]) - get_ny_time()).days / 365.25
+            gex = calculate_gex(spot_price, row["strike"], T, row["impliedVolatility"], row["option_type"], row["openInterest"])
+            total_gex += gex
 
     st.write(f"Total GEX: {total_gex}")
-    
+
     # Enviar alerta por Telegram
     if mode == "manual":
         send_telegram_alert(f"Análisis manual para {ticker}: Total GEX: {total_gex}")
@@ -126,11 +152,11 @@ def main():
     # Configuración en la barra lateral
     ticker = st.sidebar.selectbox("Seleccionar Activo:", ["SPY", "QQQ", "IWM", "AAPL", "TSLA"])
     expiry_date = st.sidebar.date_input("Fecha de Expiración:", min_value=datetime.today())
-    
+
     # Llamada para ejecutar análisis manual
     if st.sidebar.button("🔍 Ejecutar Análisis Manual"):
         run_analysis(ticker, expiry_date, mode="manual")
-    
+
     # Verificar si estamos en el horario adecuado para alertas automáticas
     alert_time = check_alert_time()
     if alert_time:
