@@ -61,6 +61,9 @@ class GEXScanner:
             
             chain = stock.option_chain(expiry_str)
             
+            # Verificar las columnas disponibles en la cadena de opciones
+            st.write("Columnas disponibles en la cadena de opciones:", chain.calls.columns)
+
             defaults = {
                 'impliedVolatility': 0.3,
                 'openInterest': 0,
