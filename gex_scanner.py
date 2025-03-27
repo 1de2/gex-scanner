@@ -1,4 +1,3 @@
-# gex_scanner.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -96,7 +95,11 @@ class GEXScanner:
             if chain.empty:
                 return {"error": "Cadena de opciones vacía"}
             
-            chain["T"] = (pd.to_datetime(chain["expiry"]) - pd.Timestamp.now()).dt.days / 365.25
+            if "expiry" in chain.columns:
+                chain["T"] = (pd.to_datetime(chain["expiry"]) - pd.Timestamp.now()).dt.days / 365.25
+            else:
+                st.error("La columna 'expiry' no está presente en la cadena de opciones")
+                return {}
             
             chain[["delta", "gamma"]] = chain.apply(
                 lambda row: self.calculate_greeks(
@@ -161,7 +164,7 @@ def main():
             "Fecha de Expiración:",
             options=available_dates,
             format_func=lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
-            index=min(3, len(available_dates)-1
+            index=min(3, len(available_dates)-1)  # Paréntesis de cierre añadido
         )
         expiry_date = pd.to_datetime(expiry_date)
         
