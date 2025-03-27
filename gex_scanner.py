@@ -13,31 +13,11 @@ from typing import Dict, Optional, List
 # Configuración
 NY_TZ = pytz.timezone("America/New_York")
 TODAY = datetime.now(NY_TZ).date()
-MAX_MANUAL_SCANS = 1  # Límite de análisis manuales
 
 class GEXScanner:
     def __init__(self):
-        self.counter_file = "scan_counter.json"
         self.history_file = "scan_history.json"
-        self.load_counter()
         self.load_history()
-
-    def load_counter(self):
-        """Carga el contador de escaneos desde JSON"""
-        try:
-            with open(self.counter_file, "r") as f:
-                data = json.load(f)
-                if data["date"] == str(TODAY):
-                    self.counter = data
-                    return
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        self.counter = {"date": str(TODAY), "manual_scans": 0}
-
-    def save_counter(self):
-        """Guarda el contador en JSON"""
-        with open(self.counter_file, "w") as f:
-            json.dump(self.counter, f)
 
     def load_history(self):
         """Carga el historial de escaneos"""
@@ -62,9 +42,21 @@ class GEXScanner:
         return delta, gamma
 
     def fetch_option_chain(self, ticker: str, expiry: datetime) -> pd.DataFrame:
-        """Obtiene la cadena de opciones"""
+        """Obtiene la cadena de opciones con manejo de fechas disponibles"""
         try:
-            chain = yf.Ticker(ticker).option_chain(expiry.strftime("%Y-%m-%d"))
+            stock = yf.Ticker(ticker)
+            available_expirations = stock.options
+            
+            if expiry.strftime("%Y-%m-%d") not in available_expirations:
+                # Selecciona la fecha más cercana posterior
+                valid_dates = [pd.to_datetime(e) for e in available_expirations 
+                              if pd.to_datetime(e) >= pd.to_datetime(expiry)]
+                if valid_dates:
+                    expiry = min(valid_dates)
+                else:
+                    expiry = pd.to_datetime(available_expirations[-1])
+            
+            chain = stock.option_chain(expiry.strftime("%Y-%m-%d"))
             calls = chain.calls.assign(option_type="call")
             puts = chain.puts.assign(option_type="put")
             return pd.concat([calls, puts])
@@ -74,7 +66,7 @@ class GEXScanner:
 
     def scan(self, ticker: str = "SPY", expiry_date: Optional[datetime] = None,
              mode: Optional[str] = None) -> Optional[Dict]:
-        """Ejecuta el análisis GEX"""
+        """Ejecuta el análisis GEX (sin límites manuales)"""
         if expiry_date is None:
             expiry_date = TODAY + timedelta(days=3)
         
@@ -97,16 +89,10 @@ class GEXScanner:
         chain["gex"] = chain["gamma"] * chain["openInterest"] * (S ** 2) * 0.01 / 1e6
         
         # Determinar tipo de análisis
-        if mode == "premarket":
-            analysis_type = "Pre-Market (7 AM NY)"
-        elif mode == "marketopen":
-            analysis_type = "Market Open (9:30 AM NY)"
-        else:
-            analysis_type = "Manual"
-            if self.counter["manual_scans"] >= MAX_MANUAL_SCANS:
-                return {"error": "Límite diario alcanzado"}
-            self.counter["manual_scans"] += 1
-            self.save_counter()
+        analysis_type = {
+            "premarket": "Pre-Market (7 AM NY)",
+            "marketopen": "Market Open (9:30 AM NY)",
+        }.get(mode, "Manual")
         
         # Preparar resultados
         result = {
@@ -122,7 +108,8 @@ class GEXScanner:
             "top_puts": chain[chain["option_type"] == "put"]
                         .nsmallest(3, "gex")[["strike", "gex"]]
                         .rename(columns={"gex": "gex ($M)"})
-                        .to_dict("records")
+                        .to_dict("records"),
+            "expiry_used": expiry_date.strftime("%Y-%m-%d")
         }
         
         # Guardar en historial
@@ -164,75 +151,61 @@ def main():
         # Sidebar
         st.sidebar.header("Configuración")
         ticker = st.sidebar.selectbox("Activo:", ["SPY", "QQQ"])
-        expiry_date = st.sidebar.date_input(
-            "Fecha de Expiración:",
-            TODAY + timedelta(days=3)
-        )
         
-        # Botón de análisis manual
+        # Selector de fechas basado en disponibilidad
+        try:
+            available_dates = yf.Ticker(ticker).options
+            expiry_date = st.sidebar.selectbox(
+                "Fecha de Expiración:",
+                options=available_dates,
+                format_func=lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
+                index=min(3, len(available_dates)-1)  # Selecciona una fecha cercana por defecto
+            )
+            expiry_date = pd.to_datetime(expiry_date)
+        except Exception as e:
+            st.sidebar.error(f"Error cargando fechas: {str(e)}")
+            return
+        
+        # Botón de análisis manual (sin límites)
         if st.sidebar.button("🔍 Ejecutar Análisis Manual"):
             with st.spinner("Calculando GEX..."):
                 results = scanner.scan(ticker, expiry_date, mode="manual")
-                if results and "error" not in results:
+                if results:
                     st.success("✅ Análisis completado!")
                     st.json(results)
-                elif "error" in results:
-                    st.error(f"❌ {results['error']}")
         
-        # Mostrar contador
-        st.sidebar.markdown(f"""
-        **📅 Límites Diarios:**  
-        - Automáticos: 2 (7 AM & 9:30 AM NY)  
-        - Manuales: {scanner.counter['manual_scans']}/{MAX_MANUAL_SCANS}  
+        # Mostrar info (sin contador de límites)
+        st.sidebar.markdown("""
+        **📅 Análisis Automáticos:**  
+        - ⏰ 7:00 AM NY (Pre-Market)  
+        - 🕤 9:30 AM NY (Market Open)  
         """)
         
         # Pestañas
-        tab1, tab2, tab3 = st.tabs(["📊 Resultados", "📅 Historial", "⚙️ Configuración"])
+        tab1, tab2 = st.tabs(["📊 Resultados", "📅 Historial"])
         
         with tab1:
-            st.header("Análisis Más Reciente")
             if scanner.history["manual"]:
                 st.json(scanner.history["manual"][-1])
             else:
                 st.info("Ejecuta un análisis manual para ver resultados")
         
         with tab2:
-            st.header("Historial de Escaneos")
+            st.header("Historial Completo")
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Pre-Market (7 AM NY)")
-                for scan in scanner.get_history("premarket"):
-                    with st.expander(f"{scan['timestamp']} - ${scan['total_gex']}M"):
-                        st.json(scan)
+                st.subheader("Automáticos")
+                for scan_type in ["premarket", "marketopen"]:
+                    with st.expander(f"{scan_type.replace('_', ' ').title()}"):
+                        for scan in scanner.get_history(scan_type, 3):
+                            st.json(scan)
             
             with col2:
-                st.subheader("Market Open (9:30 AM NY)")
-                for scan in scanner.get_history("marketopen"):
-                    with st.expander(f"{scan['timestamp']} - ${scan['total_gex']}M"):
+                st.subheader("Manuales")
+                for scan in scanner.get_history("manual", 10):
+                    with st.expander(f"{scan['timestamp']}"):
                         st.json(scan)
-        
-        with tab3:
-            st.header("Configuración Avanzada")
-            st.markdown("""
-            ### GitHub Actions Setup
-            ```yaml
-            # .github/workflows/scan.yml
-            name: GEX Auto-Scanner
-            on:
-              schedule:
-                - cron: '0 11 * * 1-5'  # 7 AM NY (UTC-4)
-                - cron: '30 13 * * 1-5'  # 9:30 AM NY
-            jobs:
-              scan:
-                runs-on: ubuntu-latest
-                steps:
-                  - uses: actions/checkout@v4
-                  - run: pip install -r requirements.txt
-                  - run: python gex_scanner.py --auto-scan --mode premarket
-                  - run: python gex_scanner.py --auto-scan --mode marketopen
-            ```
-            """)
 
 if __name__ == "__main__":
     main()
