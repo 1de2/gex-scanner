@@ -71,6 +71,7 @@ class GEXScanner:
                 'strike': 0.0
             }
             
+            # Asegurarse de que la columna 'contractSymbol' contiene la fecha de expiración
             dfs = []
             for opt_type, df in [('call', chain.calls), ('put', chain.puts)]:
                 df = df.copy()
@@ -78,6 +79,15 @@ class GEXScanner:
                     if col not in df.columns:
                         df[col] = default
                 df['option_type'] = opt_type
+
+                # Extraer la fecha de expiración desde el 'contractSymbol' si está disponible
+                if 'contractSymbol' in df.columns:
+                    df['expiry'] = df['contractSymbol'].apply(self.extract_expiry_from_symbol)
+                
+                # Si no se pudo extraer la fecha, intentamos usar 'lastTradeDate'
+                if 'expiry' not in df.columns:
+                    df['expiry'] = df['lastTradeDate'].apply(lambda x: pd.to_datetime(x) + timedelta(days=30))  # Aproximación por defecto
+                
                 dfs.append(df)
             
             return pd.concat(dfs, ignore_index=True)
@@ -85,6 +95,17 @@ class GEXScanner:
         except Exception as e:
             st.error(f"Error crítico: {str(e)}")
             return pd.DataFrame()
+
+    def extract_expiry_from_symbol(self, symbol: str) -> pd.Timestamp:
+        """Intenta extraer la fecha de expiración desde el símbolo del contrato de opción"""
+        try:
+            # Asegúrate de que el símbolo tenga el formato esperado
+            expiry_str = symbol[-8:]  # Asumiendo que la fecha de expiración está al final del símbolo en formato YYYYMMDD
+            expiry_date = pd.to_datetime(expiry_str, format='%y%m%d')
+            return expiry_date
+        except Exception as e:
+            st.error(f"Error extrayendo fecha de expiración: {str(e)}")
+            return pd.NaT
 
     def scan(self, ticker: str, expiry_date: datetime, mode: str = None) -> Dict:
         """Ejecuta el análisis GEX completo"""
