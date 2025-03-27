@@ -36,6 +36,11 @@ class GEXScanner:
             d1 = (np.log(S / K) + (0.01 + 0.5 * iv**2) * T) / (iv * np.sqrt(T))
             delta = norm.cdf(d1) if option_type == "call" else norm.cdf(d1) - 1
             gamma = norm.pdf(d1) / (S * iv * np.sqrt(T))
+            
+            # Asegurar que delta y gamma no sean NaN
+            if np.isnan(delta) or np.isnan(gamma):
+                delta, gamma = 0.0, 0.0
+            
             return delta, gamma
         except Exception as e:
             st.error(f"Error calculando griegas: {str(e)}")
@@ -127,6 +132,7 @@ class GEXScanner:
                 st.error("La columna 'expiry' no está presente en la cadena de opciones")
                 return {}
             
+            # Verificar los valores de delta, gamma y openInterest
             chain[["delta", "gamma"]] = chain.apply(
                 lambda row: self.calculate_greeks(
                     S, row["strike"], row["T"], row["impliedVolatility"], row["option_type"]
@@ -134,7 +140,11 @@ class GEXScanner:
                 axis=1, result_type="expand"
             )
             
+            # Verificar valores de gex
             chain["gex"] = chain["gamma"] * chain["openInterest"] * (S ** 2) * 0.01 / 1e6
+
+            # Verificar si hay NaN en gex
+            chain['gex'] = chain['gex'].fillna(0)
             
             result = {
                 "analysis_type": mode if mode else "Manual",
