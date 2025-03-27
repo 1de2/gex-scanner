@@ -53,14 +53,16 @@ class GEXScanner:
             expiry_str = expiry.strftime("%Y-%m-%d")
             available_dates = [pd.to_datetime(d) for d in stock.options]
             
+            st.write(f"Fechas disponibles de expiración: {available_dates}")  # Depuración
+
             if expiry_str not in stock.options:
                 valid_dates = [d for d in available_dates if d >= pd.to_datetime(expiry)]
                 expiry = min(valid_dates) if valid_dates else max(available_dates)
                 expiry_str = expiry.strftime("%Y-%m-%d")
                 st.warning(f"Usando fecha {expiry_str} (la solicitada no estaba disponible)")
-            
+
             chain = stock.option_chain(expiry_str)
-            
+
             # Verificar las columnas disponibles en la cadena de opciones
             st.write("Columnas disponibles en la cadena de opciones:", chain.calls.columns)
 
