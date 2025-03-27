@@ -55,7 +55,7 @@ def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
 
             # Extraer la fecha de expiración desde el 'contractSymbol' si está disponible
             if 'contractSymbol' in df.columns:
-                df['expiry'] = df['contractSymbol'].apply(self.extract_expiry_from_symbol)
+                df['expiry'] = df['contractSymbol'].apply(extract_expiry_from_symbol)
 
             # Si no se pudo extraer la fecha, intentamos usar 'lastTradeDate'
             if 'expiry' not in df.columns:
@@ -68,7 +68,7 @@ def fetch_option_chain(ticker: str, expiry: datetime) -> pd.DataFrame:
         st.error(f"Error al obtener la cadena de opciones: {e}")
         return pd.DataFrame()
 
-def extract_expiry_from_symbol(self, symbol: str) -> pd.Timestamp:
+def extract_expiry_from_symbol(symbol: str) -> pd.Timestamp:
     """Intenta extraer la fecha de expiración desde el símbolo del contrato de opción"""
     try:
         # Asegúrate de que el símbolo tenga el formato esperado
